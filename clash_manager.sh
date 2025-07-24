@@ -123,9 +123,9 @@ check_clash_setup() {
         return 1
     fi
     
-    # 查找clash二进制
+    # 查找clash二进制 - 只在系统路径查找
     local clash_bin=""
-    for path in "$CONFIG_DIR/clash" "$INSTALL_DIR/clash" "/usr/local/bin/clash" "/usr/bin/clash" "$(command -v clash 2>/dev/null || echo '')"; do
+    for path in "$INSTALL_DIR/clash" "/usr/local/bin/clash" "/usr/bin/clash" "$(command -v clash 2>/dev/null || echo '')"; do
         if [ -x "$path" ]; then
             clash_bin="$path"
             break
@@ -191,14 +191,49 @@ get_current_version() {
 get_latest_version_info() {
     print_step "获取最新版本信息..."
     
-    local release_info=$(curl -s "$GITHUB_API" 2>/dev/null)
-    if [ -z "$release_info" ] || [ "$release_info" = "null" ]; then
-        print_error "无法获取版本信息"
-        return 1
+    # 添加 User-Agent 以避免被拒绝
+    local release_info=$(curl -s -m 10 -H "User-Agent: Mozilla/5.0" "$GITHUB_API" 2>/dev/null)
+    
+    # 调试：显示响应的前100个字符
+    if [ -n "${DEBUG:-}" ]; then
+        echo "API响应: ${release_info:0:100}..."
     fi
     
-    LATEST_VERSION=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
-    if [ -z "$LATEST_VERSION" ]; then
+    # 检查是否是有效的 JSON 响应（应该包含 tag_name）
+    if [ -z "$release_info" ] || [ "$release_info" = "null" ] || ! echo "$release_info" | grep -q '"tag_name"'; then
+        print_warning "GitHub API 访问失败，尝试镜像 API..."
+        
+        # 尝试使用镜像 API
+        release_info=$(curl -s -m 10 -H "User-Agent: Mozilla/5.0" "https://mirror.ghproxy.com/$GITHUB_API" 2>/dev/null)
+        
+        if [ -z "$release_info" ] || [ "$release_info" = "null" ]; then
+            # 备用方案：从 releases 页面提取
+            print_warning "镜像 API 也失败，尝试从页面提取..."
+            local latest_url=$(curl -sL -m 10 "https://github.com/MetaCubeX/mihomo/releases/latest" 2>/dev/null | grep -o '/MetaCubeX/mihomo/releases/tag/[^"]*' | head -1)
+            if [ -n "$latest_url" ]; then
+                LATEST_VERSION=$(echo "$latest_url" | sed 's|.*/tag/||')
+                if [ -n "$LATEST_VERSION" ]; then
+                    print_success "最新版本: $LATEST_VERSION (从页面获取)"
+                    return 0
+                fi
+            fi
+            
+            # 最后的备用方案：使用已知的最新版本
+            print_warning "无法自动获取版本，使用默认版本 v1.19.11"
+            LATEST_VERSION="v1.19.11"
+            print_success "使用版本: $LATEST_VERSION (默认)"
+            return 0
+        fi
+    fi
+    
+    # 尝试用 jq 解析，如果没有 jq 就用 grep
+    if command -v jq >/dev/null 2>&1; then
+        LATEST_VERSION=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
+    else
+        LATEST_VERSION=$(echo "$release_info" | grep '"tag_name"' | cut -d'"' -f4)
+    fi
+    
+    if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ]; then
         print_error "无法解析版本信息"
         return 1
     fi
@@ -212,38 +247,79 @@ download_clash_core() {
     local version="$1"
     local platform="$2"
     
-    # 构建下载URL
-    local filename="mihomo-${platform}.tar.gz"
-    local download_url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/${filename}"
+    # 构建下载URL - 注意文件名格式包含版本号
+    local filename="mihomo-${platform}-${version}.gz"
+    local original_url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/${filename}"
     
     print_step "下载 mihomo ${version} (${platform})..."
-    print_info "下载地址: $download_url"
     
     # 创建临时目录
     local temp_dir=$(mktemp -d)
     trap "rm -rf $temp_dir" EXIT
     
-    # 下载文件
-    if ! wget -q --show-progress -O "$temp_dir/$filename" "$download_url"; then
-        print_error "下载失败"
+    # 尝试使用镜像下载
+    local mirrors=(
+        "https://ghfast.top/"
+        "https://mirror.ghproxy.com/"  # 新的推荐镜像
+        "https://ghproxy.com/"
+        "https://github.moeyy.xyz/"
+        "https://gh.ddlc.top/"
+        ""  # 原始地址作为最后尝试
+    )
+    
+    local downloaded=false
+    for mirror in "${mirrors[@]}"; do
+        local download_url="${mirror}${original_url}"
+        if [ -z "$mirror" ]; then
+            print_info "尝试原始地址..."
+        else
+            print_info "尝试镜像: $mirror"
+        fi
+        
+        if wget --timeout=30 --tries=2 -O "$temp_dir/$filename" "$download_url" 2>/dev/null; then
+            # 验证文件是否为有效的 tar.gz 文件
+            # 检查文件大小（至少要有 1MB）
+            local file_size=$(stat -c%s "$temp_dir/$filename" 2>/dev/null || echo 0)
+            if [ "$file_size" -gt 1048576 ]; then
+                # 尝试用 gzip -t 测试文件完整性
+                if gzip -t "$temp_dir/$filename" 2>/dev/null; then
+                    downloaded=true
+                    print_success "下载成功！(大小: $(( file_size / 1024 / 1024 ))MB)"
+                    break
+                else
+                    # 可能是 HTML 错误页面
+                    print_warning "下载的文件无效"
+                    if [ -n "${DEBUG:-}" ]; then
+                        echo "文件大小: $file_size 字节"
+                        echo "文件内容预览: $(head -c 200 "$temp_dir/$filename" 2>/dev/null | grep -o '[[:print:]]*')"
+                    fi
+                fi
+            else
+                print_warning "文件太小 (${file_size} 字节)，可能是错误页面"
+            fi
+        else
+            if [ -n "$mirror" ]; then
+                print_warning "下载失败，尝试下一个镜像..."
+            fi
+        fi
+    done
+    
+    if [ "$downloaded" = "false" ]; then
+        print_error "所有下载方式都失败了"
         return 1
     fi
     
-    # 解压文件
+    # 解压文件 - 现在是 .gz 格式，不是 tar.gz
     print_step "解压文件..."
-    if ! tar -xzf "$temp_dir/$filename" -C "$temp_dir"; then
+    local binary_file="$temp_dir/mihomo"
+    if ! gzip -dc "$temp_dir/$filename" > "$binary_file"; then
         print_error "解压失败"
         return 1
     fi
     
-    # 查找解压后的二进制文件
-    local binary_file=""
-    if [ -f "$temp_dir/mihomo" ]; then
-        binary_file="$temp_dir/mihomo"
-    elif [ -f "$temp_dir/clash" ]; then
-        binary_file="$temp_dir/clash"
-    else
-        print_error "找不到二进制文件"
+    # 验证解压后的文件
+    if [ ! -f "$binary_file" ] || [ ! -s "$binary_file" ]; then
+        print_error "解压后的文件无效"
         return 1
     fi
     
@@ -287,18 +363,20 @@ install_clash_core() {
         need_sudo=false
     else
         need_sudo=true
-        print_warning "需要管理员权限安装到 $INSTALL_DIR"
     fi
     
     # 安装新版本
-    print_step "安装到: $install_path"
     if [ "$need_sudo" = "true" ]; then
+        print_step "安装到系统目录需要管理员权限"
+        print_info "执行: sudo cp $DOWNLOADED_BINARY $install_path"
         if ! sudo cp "$DOWNLOADED_BINARY" "$install_path"; then
             print_error "安装失败"
             return 1
         fi
+        print_step "设置执行权限..."
         sudo chmod +x "$install_path"
     else
+        print_step "安装到: $install_path"
         if ! cp "$DOWNLOADED_BINARY" "$install_path"; then
             print_error "安装失败"
             return 1
@@ -306,11 +384,7 @@ install_clash_core() {
         chmod +x "$install_path"
     fi
     
-    # 创建符号链接（如果需要）
-    if [ "$install_path" != "$CONFIG_DIR/clash" ]; then
-        print_step "创建符号链接..."
-        ln -sf "$install_path" "$CONFIG_DIR/clash" 2>/dev/null || true
-    fi
+    # 不再创建符号链接，直接使用系统级安装
     
     # 更新环境变量
     export CLASH_BINARY="$install_path"
@@ -471,10 +545,12 @@ create_debug_environment() {
     fi
     
     print_step "创建调试会话..."
-    tmux new-session -d -s "$DEBUG_SESSION"
+    # 创建会话时指定较大的默认窗口大小
+    tmux new-session -d -s "$DEBUG_SESSION" -x 120 -y 30
     
-    # 强制刷新窗口大小
-    tmux refresh-client -t "$DEBUG_SESSION"
+    # 设置默认窗口大小
+    tmux set-option -t "$DEBUG_SESSION" default-terminal "screen-256color"
+    tmux set-window-option -t "$DEBUG_SESSION" aggressive-resize on
     
     # === 重命名窗口 ===
     tmux rename-window -t "$DEBUG_SESSION:0" "Debug"
@@ -489,7 +565,8 @@ create_debug_environment() {
     # 优先连接到服务会话查看实时日志
     if tmux has-session -t "$SERVICE_SESSION" 2>/dev/null; then
         tmux send-keys -t "$DEBUG_SESSION:0.1" "echo '📄 Clash实时日志 | 会话: $SERVICE_SESSION'" Enter
-        tmux send-keys -t "$DEBUG_SESSION:0.1" "watch -n 2 -t 'tmux capture-pane -t $SERVICE_SESSION -p | tail -25'" Enter
+        # 使用 COLUMNS 环境变量让 watch 使用全宽度
+        tmux send-keys -t "$DEBUG_SESSION:0.1" "COLUMNS=\$(tput cols) watch -n 2 -t 'tmux capture-pane -t $SERVICE_SESSION -p | tail -25 | cut -c1-\$(tput cols)'" Enter
     else
         # 查找日志文件
         local log_paths=(
@@ -514,7 +591,7 @@ create_debug_environment() {
             tmux send-keys -t "$DEBUG_SESSION:0.1" "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'" Enter
             tmux send-keys -t "$DEBUG_SESSION:0.1" "echo '⚠️  未找到日志文件，监控服务会话输出...'" Enter
             tmux send-keys -t "$DEBUG_SESSION:0.1" "echo ''" Enter
-            tmux send-keys -t "$DEBUG_SESSION:0.1" "watch -n 2 -t 'tmux has-session -t $SERVICE_SESSION 2>/dev/null && tmux capture-pane -t $SERVICE_SESSION -p | tail -20 || echo \"💡 启动服务: bash clash-manager.sh start\"'" Enter
+            tmux send-keys -t "$DEBUG_SESSION:0.1" "COLUMNS=\$(tput cols) watch -n 2 -t 'tmux has-session -t $SERVICE_SESSION 2>/dev/null && tmux capture-pane -t $SERVICE_SESSION -p | tail -20 | cut -c1-\$(tput cols) || echo \"💡 启动服务: bash clash-manager.sh start\"'" Enter
         fi
     fi
     
@@ -620,7 +697,7 @@ show_menu() {
     echo ""
     echo "🔧 调试工具:"
     echo "  7) 创建调试环境"
-    echo "  8) 连接调试环境"
+    echo "  8) 连接/删除调试环境"
     echo "  9) 查看服务日志"
     echo ""
     echo "📊 其他:"
@@ -629,6 +706,19 @@ show_menu() {
     echo ""
     echo "  0) 退出"
     echo ""
+}
+
+# 删除调试会话
+cleanup_debug_session() {
+    print_header "删除调试会话"
+    
+    if tmux has-session -t "$DEBUG_SESSION" 2>/dev/null; then
+        print_step "删除调试会话: $DEBUG_SESSION"
+        tmux kill-session -t "$DEBUG_SESSION"
+        print_success "调试会话已删除"
+    else
+        print_info "调试会话不存在"
+    fi
 }
 
 # 清理所有
@@ -773,7 +863,28 @@ main() {
                         ;;
                     8)
                         if tmux has-session -t "$DEBUG_SESSION" 2>/dev/null; then
-                            tmux attach -t "$DEBUG_SESSION"
+                            echo "调试会话存在"
+                            echo "1) 连接到调试会话"
+                            echo "2) 删除调试会话"
+                            echo "0) 返回上一层"
+                            read -p "请选择 [0-2]: " debug_choice
+                            
+                            case $debug_choice in
+                                1)
+                                    tmux attach -t "$DEBUG_SESSION"
+                                    ;;
+                                2)
+                                    cleanup_debug_session
+                                    read -p "按回车继续..."
+                                    ;;
+                                0)
+                                    # 返回上一层，不做任何操作
+                                    ;;
+                                *)
+                                    print_warning "无效选择"
+                                    read -p "按回车继续..."
+                                    ;;
+                            esac
                         else
                             print_warning "调试环境不存在，请先创建"
                             read -p "按回车继续..."
