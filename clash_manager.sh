@@ -1786,19 +1786,33 @@ execute_immediate_destruct() {
     print_step "清理 crontab..."
     crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
     
-    # 最后删除脚本自身和相关文件
-    print_step "删除管理脚本..."
-    local script_dir="$(dirname "$(readlink -f "$0")")"
-    local script_name="$(basename "$0")"
-    
-    # 删除配置文件
-    rm -f "$script_dir/clash_config.conf" 2>/dev/null || true
+    # 获取脚本所在目录
+    local script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
     
     print_success "自毁完成！"
-    echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
+    echo "[$(date)] 自毁完成，即将删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
     
-    # 最后删除脚本自身
-    rm -f "$0" 2>/dev/null || true
+    # 创建临时脚本来删除整个目录
+    local temp_script="/tmp/clash_final_destruct_$$.sh"
+    cat > "$temp_script" << EOF
+#!/bin/bash
+# 等待主脚本退出
+sleep 2
+# 删除整个脚本目录
+rm -rf "$script_dir"
+echo "[$(date)] 已删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
+# 删除自己
+rm -f "$temp_script"
+EOF
+    
+    chmod +x "$temp_script"
+    
+    # 在后台执行删除脚本
+    nohup "$temp_script" >/dev/null 2>&1 &
+    
+    print_step "正在删除脚本目录: $script_dir"
+    
+    # 退出主脚本
     exit 0
 }
 
@@ -1812,10 +1826,10 @@ self_destruct() {
     echo "  • 停止所有 Clash 进程"
     echo "  • 删除所有配置文件"
     echo "  • 删除所有二进制文件"
-    echo "  • 删除所有管理脚本"
+    echo "  • 删除整个脚本目录"
     echo "  • 清理所有日志和缓存"
     echo ""
-    echo -e "${RED}此操作不可逆！${NC}"
+    echo -e "${RED}此操作不可逆！整个脚本目录将被完全删除！${NC}"
     echo ""
     
     read -p "确认要立即执行自毁？[y/N]: " confirm1
