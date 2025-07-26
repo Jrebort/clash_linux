@@ -768,7 +768,7 @@ show_menu() {
     echo "  12) 订阅管理"
     echo "  13) 节点切换"
     echo "  14) 模式切换"
-    echo "  15) 定时自毁"
+    echo "  15) 立即自毁"
     echo "  16) 卸载 Clash"
     echo ""
     echo "  0) 退出"
@@ -1740,83 +1740,73 @@ switch_proxy_mode() {
     fi
 }
 
-# 创建自毁脚本内容
-create_destruct_script() {
-    local script_path="$1"
-    local is_reboot="${2:-false}"
+# 立即执行自毁
+execute_immediate_destruct() {
+    print_warning "开始执行自毁程序..."
+    sleep 2
     
-    if [ "$is_reboot" == "true" ]; then
-        # 重启版本的自毁脚本
-        cat > "$script_path" << 'EOF'
-#!/bin/bash
-# Clash 重启自毁脚本
-sleep 30  # 等待系统完全启动
-
-echo "[$(date)] 系统重启，执行自毁程序..." >> /tmp/clash_destruct.log
-EOF
-    else
-        # 普通版本的自毁脚本
-        cat > "$script_path" << 'EOF'
-#!/bin/bash
-# Clash 自毁脚本
-echo "[$(date)] 开始执行自毁程序..." >> /tmp/clash_destruct.log
-EOF
-    fi
+    print_step "停止所有 Clash 进程..."
+    # 使用精确匹配避免杀死脚本自身
+    pkill -x clash 2>/dev/null || true
+    pkill -x mihomo 2>/dev/null || true
     
-    # 添加通用的自毁内容
-    cat >> "$script_path" << 'EOF'
-
-# 停止所有进程
-pkill -9 -f clash 2>/dev/null || true
-pkill -9 -f mihomo 2>/dev/null || true
-
-# 清理tmux会话
-tmux kill-server 2>/dev/null || true
-
-# 删除二进制文件
-sudo rm -f /usr/local/bin/clash /usr/local/bin/mihomo 2>/dev/null || true
-rm -f $HOME/.local/bin/clash $HOME/.local/bin/mihomo 2>/dev/null || true
-
-# 删除配置和数据
-rm -rf $HOME/.config/mihomo $HOME/.config/clash 2>/dev/null || true
-sudo rm -rf /etc/clash /etc/mihomo 2>/dev/null || true
-
-# 删除管理脚本目录
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-if [[ "$SCRIPT_DIR" == "/tmp" ]]; then
-    # 如果脚本在tmp目录，查找真实的管理脚本位置
-    REAL_DIR=$(find $HOME -name "clash_manager.sh" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
-    if [ -n "$REAL_DIR" ] && [ -d "$REAL_DIR" ]; then
-        echo "删除管理脚本目录: $REAL_DIR" >> /tmp/clash_destruct.log
-        rm -rf "$REAL_DIR"
-    fi
-else
-    rm -rf "$SCRIPT_DIR"
-fi
-
-# 清理系统服务
-sudo systemctl stop clash mihomo 2>/dev/null || true
-sudo systemctl disable clash mihomo 2>/dev/null || true
-sudo rm -f /etc/systemd/system/clash.service /etc/systemd/system/mihomo.service 2>/dev/null || true
-
-# 清理日志
-rm -rf /var/log/clash* /var/log/mihomo* 2>/dev/null || true
-
-# 清理crontab
-crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
-
-echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
-rm -f "$0"
-EOF
+    # 查找并杀死 clash 相关进程，但排除当前脚本
+    local current_pid=$$
+    for pid in $(pgrep -f "clash" 2>/dev/null || true); do
+        if [ "$pid" != "$current_pid" ] && [ "$pid" != "$PPID" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
     
-    chmod +x "$script_path"
+    print_step "清理 tmux 会话..."
+    tmux kill-session -t "$SERVICE_SESSION" 2>/dev/null || true
+    tmux kill-session -t "$DEBUG_SESSION" 2>/dev/null || true
+    
+    print_step "删除二进制文件..."
+    sudo rm -f /usr/local/bin/clash /usr/local/bin/mihomo 2>/dev/null || true
+    rm -f "$HOME/.local/bin/clash" "$HOME/.local/bin/mihomo" 2>/dev/null || true
+    
+    print_step "删除配置和数据..."
+    rm -rf "$CONFIG_DIR" "$HOME/.config/clash" 2>/dev/null || true
+    sudo rm -rf /etc/clash /etc/mihomo 2>/dev/null || true
+    
+    print_step "清理系统服务..."
+    sudo systemctl stop clash mihomo 2>/dev/null || true
+    sudo systemctl disable clash mihomo 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/clash.service /etc/systemd/system/mihomo.service 2>/dev/null || true
+    sudo systemctl daemon-reload 2>/dev/null || true
+    
+    print_step "清理日志和缓存..."
+    rm -rf /var/log/clash* /var/log/mihomo* 2>/dev/null || true
+    rm -rf "$HOME/.cache/clash" "$HOME/.cache/mihomo" 2>/dev/null || true
+    
+    print_step "清理备份文件..."
+    rm -rf "$BACKUP_DIR" 2>/dev/null || true
+    
+    print_step "清理 crontab..."
+    crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
+    
+    # 最后删除脚本自身和相关文件
+    print_step "删除管理脚本..."
+    local script_dir="$(dirname "$(readlink -f "$0")")"
+    local script_name="$(basename "$0")"
+    
+    # 删除配置文件
+    rm -f "$script_dir/clash_config.conf" 2>/dev/null || true
+    
+    print_success "自毁完成！"
+    echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
+    
+    # 最后删除脚本自身
+    rm -f "$0" 2>/dev/null || true
+    exit 0
 }
 
-# 定时自毁功能
+# 立即自毁功能
 self_destruct() {
-    print_header "定时自毁设置"
+    print_header "立即自毁"
     
-    echo -e "${RED}⚠️  警告：此功能将在指定时间后完全删除 Clash 及所有相关文件！${NC}"
+    echo -e "${RED}⚠️  警告：此功能将立即删除 Clash 及所有相关文件！${NC}"
     echo ""
     echo "自毁内容包括："
     echo "  • 停止所有 Clash 进程"
@@ -1825,243 +1815,25 @@ self_destruct() {
     echo "  • 删除所有管理脚本"
     echo "  • 清理所有日志和缓存"
     echo ""
-    
-    # 检查是否已有定时任务
-    local existing_jobs=$(crontab -l 2>/dev/null | grep -c "clash_self_destruct" || true)
-    if [ "$existing_jobs" -gt 0 ]; then
-        print_warning "已存在自毁任务："
-        crontab -l 2>/dev/null | grep "clash_self_destruct" | nl
-        echo ""
-        read -p "是否要查看/取消现有任务？[y/N]: " view_cancel
-        if [[ $view_cancel =~ ^[Yy]$ ]]; then
-            echo ""
-            echo "1) 查看任务详情"
-            echo "2) 取消所有自毁任务"
-            echo "0) 返回"
-            read -p "请选择 [0-2]: " cancel_choice
-            
-            case $cancel_choice in
-                1)
-                    echo ""
-                    print_info "当前自毁任务："
-                    crontab -l 2>/dev/null | grep -E "(clash_self_destruct|CLASH_DESTRUCT)" || true
-                    
-                    # 检查at任务
-                    if command -v at >/dev/null 2>&1 && command -v atq >/dev/null 2>&1; then
-                        local at_jobs=$(atq 2>/dev/null | grep -E "clash|destruct" || true)
-                        if [ -n "$at_jobs" ]; then
-                            echo ""
-                            print_info "AT 任务："
-                            echo "$at_jobs"
-                        fi
-                    fi
-                    ;;
-                2)
-                    # 移除crontab中的自毁任务
-                    crontab -l 2>/dev/null | grep -v "clash_self_destruct" | crontab - 2>/dev/null || true
-                    
-                    # 移除at任务
-                    if command -v atrm >/dev/null 2>&1; then
-                        atq 2>/dev/null | awk '{print $1}' | xargs -r atrm 2>/dev/null || true
-                    fi
-                    
-                    # 删除自毁脚本
-                    rm -f /tmp/clash_self_destruct_*.sh
-                    
-                    print_success "所有自毁任务已取消"
-                    ;;
-            esac
-            return
-        fi
-    fi
-    
-    echo "选择自毁方式："
-    echo "1) 指定时间后自毁（分钟）"
-    echo "2) 指定具体时间自毁"
-    echo "3) 指定日期时间自毁"
-    echo "4) 系统重启时自毁"
-    echo "0) 取消"
+    echo -e "${RED}此操作不可逆！${NC}"
     echo ""
     
-    read -p "请选择 [0-4]: " destruct_mode
-    
-    case $destruct_mode in
-        1)
-            echo ""
-            read -p "多少分钟后自毁？[1-1440]: " minutes
-            
-            # 验证输入
-            if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 1440 ]; then
-                print_error "无效的时间（1-1440分钟）"
-                return 1
-            fi
-            
-            # 创建自毁脚本
-            local destruct_script="/tmp/clash_self_destruct_$$.sh"
-            create_destruct_script "$destruct_script"
-            
-            # 计算执行时间
-            local exec_time=$(date -d "+$minutes minutes" "+%Y-%m-%d %H:%M:%S")
-            print_info "将在 $exec_time 执行自毁"
-            
-            # 使用at命令（如果可用）或创建cron任务
-            if command -v at >/dev/null 2>&1; then
-                echo "$destruct_script" | at now + $minutes minutes 2>/dev/null
-                print_success "自毁任务已设置（使用at）"
-            else
-                # 使用crontab
-                local cron_time=$(date -d "+$minutes minutes" "+%M %H %d %m")
-                (crontab -l 2>/dev/null; echo "$cron_time * $destruct_script # clash_self_destruct") | crontab -
-                print_success "自毁任务已设置（使用cron）"
-            fi
-            
-            print_warning "警告：系统将在 $minutes 分钟后自动删除所有 Clash 相关文件！"
-            echo ""
-            echo "取消方法："
-            echo "1. 运行: crontab -e 并删除包含 clash_self_destruct 的行"
-            echo "2. 或重新运行此功能并选择取消"
-            ;;
-            
-        2)
-            echo ""
-            echo "输入自毁时间（24小时制）"
-            read -p "时间 (HH:MM): " dest_time
-            
-            # 验证时间格式
-            if ! [[ "$dest_time" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
-                print_error "无效的时间格式"
-                return 1
-            fi
-            
-            # 创建自毁脚本（同上）
-            local destruct_script="/tmp/clash_self_destruct_$$.sh"
-            cat > "$destruct_script" << 'EOF'
-#!/bin/bash
-# Clash 自毁脚本
-echo "[$(date)] 开始执行自毁程序..." >> /tmp/clash_destruct.log
-
-# 停止所有进程
-pkill -9 -f clash 2>/dev/null || true
-pkill -9 -f mihomo 2>/dev/null || true
-
-# 清理tmux会话
-tmux kill-server 2>/dev/null || true
-
-# 删除二进制文件
-sudo rm -f /usr/local/bin/clash /usr/local/bin/mihomo 2>/dev/null || true
-rm -f $HOME/.local/bin/clash $HOME/.local/bin/mihomo 2>/dev/null || true
-
-# 删除配置和数据
-rm -rf $HOME/.config/mihomo $HOME/.config/clash 2>/dev/null || true
-sudo rm -rf /etc/clash /etc/mihomo 2>/dev/null || true
-
-# 删除管理脚本目录
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-if [[ "$SCRIPT_DIR" == "/tmp" ]]; then
-    REAL_DIR=$(find $HOME -name "clash_manager.sh" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
-    if [ -n "$REAL_DIR" ] && [ -d "$REAL_DIR" ]; then
-        echo "删除管理脚本目录: $REAL_DIR" >> /tmp/clash_destruct.log
-        rm -rf "$REAL_DIR"
+    read -p "确认要立即执行自毁？[y/N]: " confirm1
+    if [[ ! $confirm1 =~ ^[Yy]$ ]]; then
+        print_info "已取消自毁"
+        return
     fi
-else
-    rm -rf "$SCRIPT_DIR"
-fi
-
-# 清理系统服务
-sudo systemctl stop clash mihomo 2>/dev/null || true
-sudo systemctl disable clash mihomo 2>/dev/null || true
-sudo rm -f /etc/systemd/system/clash.service /etc/systemd/system/mihomo.service 2>/dev/null || true
-
-# 清理日志
-rm -rf /var/log/clash* /var/log/mihomo* 2>/dev/null || true
-
-# 清理crontab
-crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
-
-echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
-rm -f "$0"
-EOF
-            chmod +x "$destruct_script"
-            
-            # 设置cron任务
-            IFS=':' read -r hour minute <<< "$dest_time"
-            (crontab -l 2>/dev/null; echo "$minute $hour * * * $destruct_script # clash_self_destruct") | crontab -
-            
-            print_success "自毁任务已设置为每天 $dest_time 执行"
-            print_warning "如果只想执行一次，请在执行后手动取消任务"
-            ;;
-            
-        3)
-            echo ""
-            echo "输入自毁日期和时间"
-            read -p "日期 (YYYY-MM-DD): " dest_date
-            read -p "时间 (HH:MM): " dest_time
-            
-            # 验证日期时间
-            if ! date -d "$dest_date $dest_time" >/dev/null 2>&1; then
-                print_error "无效的日期时间"
-                return 1
-            fi
-            
-            # 检查是否是过去的时间
-            if [ $(date -d "$dest_date $dest_time" +%s) -lt $(date +%s) ]; then
-                print_error "不能设置过去的时间"
-                return 1
-            fi
-            
-            # 创建自毁脚本
-            local destruct_script="/tmp/clash_self_destruct_$$.sh"
-            create_destruct_script "$destruct_script"
-            
-            # 使用at命令设置特定时间
-            if command -v at >/dev/null 2>&1; then
-                echo "$destruct_script" | at "$dest_time" "$dest_date" 2>/dev/null
-                print_success "自毁任务已设置为 $dest_date $dest_time 执行"
-            else
-                print_error "需要安装 at 命令来设置特定日期时间"
-                print_info "Ubuntu/Debian: sudo apt-get install at"
-                print_info "CentOS/RHEL: sudo yum install at"
-                rm -f "$destruct_script"
-                return 1
-            fi
-            ;;
-            
-        4)
-            echo ""
-            print_warning "将在下次系统重启时执行自毁"
-            read -p "确认设置重启自毁？[y/N]: " confirm
-            if [[ ! $confirm =~ ^[Yy]$ ]]; then
-                print_info "已取消"
-                return
-            fi
-            
-            # 创建自毁脚本
-            local destruct_script="/tmp/clash_self_destruct_reboot.sh"
-            create_destruct_script "$destruct_script" true
-            
-            # 添加到crontab @reboot
-            (crontab -l 2>/dev/null; echo "@reboot $destruct_script # clash_self_destruct_reboot") | crontab -
-            
-            print_success "重启自毁已设置"
-            print_warning "系统下次重启时将自动删除所有 Clash 相关文件！"
-            ;;
-            
-        0)
-            print_info "已取消自毁设置"
-            return
-            ;;
-            
-        *)
-            print_error "无效的选择"
-            return 1
-            ;;
-    esac
     
     echo ""
-    print_info "提示："
-    echo "• 查看定时任务: crontab -l | grep clash"
-    echo "• 取消自毁: 重新运行此功能并选择取消"
-    echo "• 自毁日志: /tmp/clash_destruct.log"
+    echo -e "${RED}最后警告：这将删除所有 Clash 相关文件！${NC}"
+    read -p "请输入 'DESTROY' 确认执行自毁: " confirm2
+    if [[ "$confirm2" != "DESTROY" ]]; then
+        print_info "已取消自毁"
+        return
+    fi
+    
+    echo ""
+    execute_immediate_destruct
 }
 
 # 卸载 Clash
