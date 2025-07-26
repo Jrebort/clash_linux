@@ -5,7 +5,14 @@
       "Bash(find:*)",
       "WebFetch(domain:github.com)",
       "Bash(curl:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(/mnt/f/work/clash_linux/test_url_handling.sh:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(cp:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(bash:*)"
     ],
     "deny": []
   }

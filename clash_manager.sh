@@ -7,23 +7,35 @@
 set -euo pipefail
 
 # ==================== 配置 ====================
-readonly SCRIPT_VERSION="4.0"
+readonly SCRIPT_VERSION="0.1"
 readonly CONFIG_DIR="$HOME/.config/mihomo"
-readonly API_URL="http://localhost:9090"
 readonly SERVICE_SESSION="clash-service"
 readonly DEBUG_SESSION="clash-debug"
+
+# 加载配置文件（如果存在）
+CONFIG_FILE="$(dirname "$0")/clash_config.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# 默认配置（可被配置文件覆盖）
+readonly API_URL="${API_URL:-http://${API_HOST:-localhost}:${API_PORT:-9090}}"
+readonly TEST_URL="${TEST_URL:-http://www.gstatic.com/generate_204}"
+readonly TEST_TIMEOUT="${TEST_TIMEOUT:-5000}"
+readonly MAX_CONCURRENT="${MAX_CONCURRENT:-10}"
+readonly PAGE_SIZE="${PAGE_SIZE:-15}"
 readonly GITHUB_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly BACKUP_DIR="$CONFIG_DIR/backups"
 
 # 颜色定义
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly PURPLE='\033[0;35m'
-readonly CYAN='\033[0;36m'
-readonly NC='\033[0m'
+readonly RED=$'\033[0;31m'
+readonly GREEN=$'\033[0;32m'
+readonly YELLOW=$'\033[1;33m'
+readonly BLUE=$'\033[0;34m'
+readonly PURPLE=$'\033[0;35m'
+readonly CYAN=$'\033[0;36m'
+readonly NC=$'\033[0m'
 
 # ==================== 工具函数 ====================
 
@@ -154,6 +166,41 @@ get_api_secret() {
     else
         export CURL_AUTH=""
     fi
+}
+
+# 获取当前代理模式
+get_proxy_mode() {
+    local mode="Unknown"
+    
+    # 确保有API认证
+    if [ -z "$CURL_AUTH" ]; then
+        get_api_secret
+    fi
+    
+    # 获取当前模式
+    local config=$(curl -s -H "$CURL_AUTH" "$API_URL/configs" 2>/dev/null)
+    if [ -n "$config" ] && command -v jq >/dev/null 2>&1; then
+        mode=$(echo "$config" | jq -r '.mode // "Unknown"' 2>/dev/null)
+    fi
+    
+    # 转换为友好显示
+    case "$mode" in
+        "rule")
+            echo "Rule"
+            ;;
+        "global")
+            echo "Global"
+            ;;
+        "direct")
+            echo "Direct"
+            ;;
+        "script")
+            echo "Script"
+            ;;
+        *)
+            echo "$mode"
+            ;;
+    esac
 }
 
 # 检查服务状态
@@ -638,6 +685,10 @@ show_status() {
     if [ "$CLASH_API_OK" = "true" ]; then
         echo "  API状态: ✅ 响应正常"
         
+        # 获取代理模式
+        local proxy_mode=$(get_proxy_mode)
+        echo "  代理模式: $proxy_mode"
+        
         # 获取连接数
         local conn_count=0
         if command -v jq >/dev/null 2>&1; then
@@ -683,7 +734,18 @@ show_menu() {
         status_text="API异常"
     fi
     
-    echo -e "当前状态: $status_icon $status_text | 版本: $(get_current_version)"
+    # 获取代理模式
+    local proxy_mode=""
+    if [ "$CLASH_API_OK" = "true" ]; then
+        proxy_mode=$(get_proxy_mode)
+        if [ -n "$proxy_mode" ] && [ "$proxy_mode" != "Unknown" ]; then
+            proxy_mode=" | 模式: $proxy_mode"
+        else
+            proxy_mode=""
+        fi
+    fi
+    
+    echo -e "当前状态: $status_icon $status_text | 版本: $(get_current_version)$proxy_mode"
     echo ""
     echo "📦 内核管理:"
     echo "  1) 检查更新"
@@ -703,6 +765,11 @@ show_menu() {
     echo "📊 其他:"
     echo "  10) 显示详细状态"
     echo "  11) 清理所有会话"
+    echo "  12) 订阅管理"
+    echo "  13) 节点切换"
+    echo "  14) 模式切换"
+    echo "  15) 定时自毁"
+    echo "  16) 卸载 Clash"
     echo ""
     echo "  0) 退出"
     echo ""
@@ -738,8 +805,1299 @@ cleanup_all() {
     print_success "清理完成"
 }
 
-# ==================== 主函数 ====================
+# 订阅管理
+manage_subscription() {
+    print_header "订阅管理"
+    
+    # 检查下载器是否存在
+    local downloader_path="$(dirname "$0")/subdownloader.sh"
+    if [ ! -f "$downloader_path" ]; then
+        print_error "订阅下载器不存在: $downloader_path"
+        print_info "请确保 subdownloader.sh 在同一目录下"
+        return 1
+    fi
+    
+    echo "1) 更新订阅（从链接）"
+    echo "2) 导入订阅（从文件）"
+    echo "3) 使用示例配置"
+    echo "4) 备份当前配置"
+    echo "5) 恢复备份配置"
+    echo "0) 返回"
+    echo ""
+    
+    read -p "请选择 [0-5]: " sub_choice
+    
+    case $sub_choice in
+        1)
+            echo ""
+            print_info "请输入订阅链接"
+            print_info "示例: https://example.com/clash?token=xxx&flag=true"
+            echo ""
+            read -p "订阅链接: " sub_url
+            if [ -z "$sub_url" ]; then
+                print_error "订阅链接不能为空"
+                return 1
+            fi
+            
+            # 自动处理 URL，确保安全传递
+            print_step "下载订阅配置..."
+            if "$downloader_path" -b -t "$sub_url"; then
+                print_success "订阅更新成功！"
+                
+                # 询问是否重启服务
+                check_clash_status
+                if [ "$CLASH_RUNNING" = "true" ]; then
+                    read -p "是否重启服务以应用新配置？[Y/n]: " restart_confirm
+                    if [[ ! $restart_confirm =~ ^[Nn]$ ]]; then
+                        stop_clash_service
+                        sleep 2
+                        start_clash_service
+                    fi
+                fi
+            else
+                print_error "订阅下载失败"
+                print_info "请检查："
+                print_info "1. 订阅链接是否正确"
+                print_info "2. 网络连接是否正常"
+                print_info "3. 订阅是否需要代理访问"
+            fi
+            ;;
+            
+        2)
+            read -p "请输入配置文件路径: " config_file
+            if [ ! -f "$config_file" ]; then
+                print_error "文件不存在: $config_file"
+                return 1
+            fi
+            
+            print_step "导入配置文件..."
+            
+            # 备份当前配置
+            if [ -f "$CONFIG_DIR/config.yaml" ]; then
+                local backup_name="config_$(date +%Y%m%d_%H%M%S).yaml"
+                cp "$CONFIG_DIR/config.yaml" "$BACKUP_DIR/$backup_name"
+                print_info "已备份当前配置"
+            fi
+            
+            # 复制新配置
+            cp "$config_file" "$CONFIG_DIR/config.yaml"
+            
+            # 验证配置
+            if command -v clash &> /dev/null; then
+                if clash -t -f "$CONFIG_DIR/config.yaml" &>/dev/null; then
+                    print_success "配置导入成功并验证通过！"
+                else
+                    print_warning "配置已导入但验证失败，请检查配置格式"
+                fi
+            else
+                print_success "配置导入成功！"
+            fi
+            
+            # 询问是否重启服务
+            check_clash_status
+            if [ "$CLASH_RUNNING" = "true" ]; then
+                read -p "是否重启服务以应用新配置？[Y/n]: " restart_confirm
+                if [[ ! $restart_confirm =~ ^[Nn]$ ]]; then
+                    stop_clash_service
+                    sleep 2
+                    start_clash_service
+                fi
+            fi
+            ;;
+            
+        3)
+            print_step "生成示例配置..."
+            cat > "$CONFIG_DIR/config.yaml" << 'EOF'
+# Clash 示例配置
+mixed-port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
 
+dns:
+  enable: true
+  nameserver:
+    - 223.5.5.5
+    - 114.114.114.114
+
+proxies:
+  - name: "示例节点-香港"
+    type: ss
+    server: hk.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: "password123"
+    
+  - name: "示例节点-日本"
+    type: vmess
+    server: jp.example.com
+    port: 443
+    uuid: a3482e88-686a-4a58-8126-99c9df64b7bf
+    alterId: 0
+    cipher: auto
+    tls: true
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - "示例节点-香港"
+      - "示例节点-日本"
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,google.com,Proxy
+  - DOMAIN-SUFFIX,github.com,Proxy
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy
+EOF
+            print_success "示例配置已生成！"
+            print_warning "请编辑配置文件，替换为真实的节点信息"
+            ;;
+            
+        4)
+            if [ -f "$CONFIG_DIR/config.yaml" ]; then
+                local backup_name="config_$(date +%Y%m%d_%H%M%S).yaml"
+                cp "$CONFIG_DIR/config.yaml" "$BACKUP_DIR/$backup_name"
+                print_success "配置已备份到: $BACKUP_DIR/$backup_name"
+            else
+                print_warning "当前没有配置文件"
+            fi
+            ;;
+            
+        5)
+            if [ -d "$BACKUP_DIR" ] && [ "$(ls -A "$BACKUP_DIR"/*.yaml 2>/dev/null | wc -l)" -gt 0 ]; then
+                echo "可用的备份配置："
+                ls -1t "$BACKUP_DIR"/*.yaml 2>/dev/null | head -10 | nl
+                echo ""
+                read -p "请选择要恢复的备份编号: " backup_num
+                
+                if [[ "$backup_num" =~ ^[0-9]+$ ]]; then
+                    local backup_file=$(ls -1t "$BACKUP_DIR"/*.yaml 2>/dev/null | sed -n "${backup_num}p")
+                    if [ -f "$backup_file" ]; then
+                        cp "$backup_file" "$CONFIG_DIR/config.yaml"
+                        print_success "配置已恢复！"
+                        
+                        # 询问是否重启服务
+                        check_clash_status
+                        if [ "$CLASH_RUNNING" = "true" ]; then
+                            read -p "是否重启服务以应用新配置？[Y/n]: " restart_confirm
+                            if [[ ! $restart_confirm =~ ^[Nn]$ ]]; then
+                                stop_clash_service
+                                sleep 2
+                                start_clash_service
+                            fi
+                        fi
+                    else
+                        print_error "无效的备份文件"
+                    fi
+                else
+                    print_error "无效的选择"
+                fi
+            else
+                print_warning "没有可用的备份配置"
+            fi
+            ;;
+            
+        0)
+            return 0
+            ;;
+            
+        *)
+            print_warning "无效选择"
+            ;;
+    esac
+}
+
+# 节点切换功能（优化版）
+switch_proxy() {
+    print_header "节点切换"
+    
+    # 检查服务状态
+    check_clash_status
+    if [ "$CLASH_API_OK" != "true" ]; then
+        print_error "Clash API 未响应，请先启动服务"
+        return 1
+    fi
+    
+    # 检查是否有增强版脚本
+    local enhanced_script="$(dirname "$0")/switch_proxy_enhanced.sh"
+    if [ -f "$enhanced_script" ] && [ -x "$enhanced_script" ]; then
+        # 使用增强版
+        "$enhanced_script"
+        return
+    fi
+    
+    # 获取所有代理组
+    print_step "获取代理组列表..."
+    local proxy_groups=$(curl -s -H "$CURL_AUTH" "$API_URL/proxies" 2>/dev/null)
+
+    if [ -z "$proxy_groups" ]; then
+        print_error "无法获取代理组信息"
+        return 1
+    fi
+    
+    # 检查是否安装了 jq
+    if ! command -v jq >/dev/null 2>&1; then
+        print_warning "未安装 jq，使用简化显示模式"
+        echo ""
+        echo "代理组列表："
+        echo "$proxy_groups" | grep -o '"name":"[^"]*"' | sed 's/"name":"//g' | sed 's/"//g' | grep -E "(Proxy|Select|Auto|Fallback|LoadBalance|URLTest)" | nl
+        echo ""
+        print_info "建议安装 jq 以获得更好的体验："
+        print_info "  Ubuntu/Debian: sudo apt-get install jq"
+        print_info "  CentOS/RHEL: sudo yum install jq"
+        return 1
+    fi
+    
+    # 获取所有选择器类型的代理组
+    local selectors=$(echo "$proxy_groups" | jq -r '.proxies | to_entries[] | select(.value.type == "Selector") | .key')
+    
+    if [ -z "$selectors" ]; then
+        print_warning "没有找到可选择的代理组"
+        return 1
+    fi
+    
+    # 显示代理组列表
+    echo ""
+    echo "可切换的代理组："
+    echo "===================="
+    
+    # 正确处理代理组列表
+    local IFS=$'\n'
+    local groups=($(echo "$selectors"))
+    unset IFS
+    
+    local i=1
+    for group in "${groups[@]}"; do
+        # 获取当前选中的节点
+        local current=$(echo "$proxy_groups" | jq -r ".proxies[\"$group\"].now // \"N/A\"")
+        echo "$i) $group"
+        echo "   当前节点: $current"
+        echo ""
+        i=$((i + 1))
+    done
+    
+    echo "0) 返回"
+    echo ""
+    
+    # 选择代理组
+    read -p "请选择代理组 [0-$((i-1))]: " group_choice
+    
+    if [ "$group_choice" = "0" ]; then
+        return 0
+    fi
+    
+    if [ "$group_choice" -lt 1 ] || [ "$group_choice" -gt "${#groups[@]}" ]; then
+        print_error "无效的选择"
+        return 1
+    fi
+    
+    local selected_group="${groups[$((group_choice-1))]}"
+    
+    # 获取该代理组的所有节点
+    print_step "获取节点列表..."
+    local nodes=$(echo "$proxy_groups" | jq -r ".proxies[\"$selected_group\"].all[]?" 2>/dev/null)
+    
+    # 如果 all 字段不存在，尝试其他方式
+    if [ -z "$nodes" ]; then
+        # 尝试从 proxies 字段获取
+        nodes=$(echo "$proxy_groups" | jq -r ".proxies[\"$selected_group\"].proxies[]?" 2>/dev/null)
+    fi
+    
+    if [ -z "$nodes" ]; then
+        print_error "无法获取节点列表"
+        print_info "提示：请检查代理组类型是否为 select"
+        return 1
+    fi
+    
+    # 显示节点列表（分页显示）
+    echo ""
+    echo "代理组: ${CYAN}$selected_group${NC}"
+    
+    # 正确处理节点列表，保留完整的节点名称
+    local IFS=$'\n'
+    local node_array=($(echo "$nodes"))
+    unset IFS
+    
+    local total_nodes=${#node_array[@]}
+    local current_node=$(echo "$proxy_groups" | jq -r ".proxies[\"$selected_group\"].now // \"\"")
+    
+    echo "节点总数: ${GREEN}$total_nodes${NC}"
+    echo ""
+    
+    # 如果节点太多，使用分页
+    local page_size="$PAGE_SIZE"
+    local current_page=0
+    local total_pages=$(( (total_nodes + page_size - 1) / page_size ))
+    
+    while true; do
+        echo ""
+        if [ $total_nodes -gt $page_size ]; then
+            echo "节点列表 (第 ${CYAN}$((current_page + 1))${NC} 页，共 ${CYAN}$total_pages${NC} 页)："
+        else
+            echo "可用节点："
+        fi
+        echo "=========================================="
+        
+        local start=$((current_page * page_size))
+        local end=$((start + page_size))
+        if [ $end -gt $total_nodes ]; then
+            end=$total_nodes
+        fi
+        
+        # 显示当前页的节点
+        for ((i=start; i<end; i++)); do
+            local node="${node_array[$i]}"
+            local display_num=$((i + 1))
+            local mark=""
+            
+            if [ "$node" = "$current_node" ]; then
+                mark="${GREEN} ← 当前${NC}"
+            fi
+            
+            # 获取节点延迟信息
+            local delay=$(echo "$proxy_groups" | jq -r ".proxies[\"$node\"].history[-1].delay // \"N/A\"" 2>/dev/null)
+            local delay_display=""
+            local delay_color=""
+            
+            if [ "$delay" != "N/A" ] && [ "$delay" != "null" ] && [ "$delay" != "" ]; then
+                # 分离颜色和显示文本
+                if [ "$delay" -lt "${DELAY_EXCELLENT:-100}" ]; then
+                    delay_color="$GREEN"
+                elif [ "$delay" -lt "${DELAY_GOOD:-300}" ]; then
+                    delay_color="$RED"
+                else
+                    delay_color="$YELLOW"
+                fi
+                delay_display="${delay}ms"
+            else
+                delay_color="$CYAN"
+                delay_display="未测试"
+            fi
+            
+            # 获取节点类型
+            local node_type=$(echo "$proxy_groups" | jq -r ".proxies[\"$node\"].type // \"Unknown\"" 2>/dev/null)
+            if [ "$node_type" = "null" ] || [ -z "$node_type" ]; then
+                node_type="Unknown"
+            fi
+            
+            # 缩短过长的节点名
+            local short_name="$node"
+            if [ ${#node} -gt 35 ]; then
+                short_name="${node:0:32}..."
+            fi
+            
+            # 使用 echo -e 来正确解释颜色代码
+            printf "%3d) %-35s [%-8s] " "$display_num" "$short_name" "$node_type"
+            echo -e "${delay_color}${delay_display}${NC}${mark}"
+        done
+        
+        echo "=========================================="
+        echo ""
+        
+        # 分页控制选项
+        if [ $total_nodes -gt $page_size ]; then
+            echo "N) 下一页  P) 上一页  S) 搜索节点"
+        fi
+        echo "T) 测试所有  F) 快速测试(<500ms)  1-$total_nodes) 选择节点  0) 返回"
+        echo ""
+        
+        read -p "请输入选择: " choice
+        
+        case "${choice,,}" in
+            n)  # 下一页
+                if [ $((current_page + 1)) -lt $total_pages ]; then
+                    current_page=$((current_page + 1))
+                else
+                    print_warning "已经是最后一页"
+                fi
+                continue
+                ;;
+            p)  # 上一页
+                if [ $current_page -gt 0 ]; then
+                    ((current_page--))
+                else
+                    print_warning "已经是第一页"
+                fi
+                continue
+                ;;
+            s)  # 搜索节点
+                echo ""
+                read -p "输入搜索关键词: " keyword
+                if [ -n "$keyword" ]; then
+                    local found=false
+                    echo ""
+                    echo "搜索结果："
+                    for i in "${!node_array[@]}"; do
+                        if [[ "${node_array[$i],,}" == *"${keyword,,}"* ]]; then
+                            echo "$((i+1))) ${node_array[$i]}"
+                            found=true
+                        fi
+                    done
+                    if [ "$found" = "false" ]; then
+                        print_warning "没有找到匹配的节点"
+                    fi
+                    echo ""
+                    read -p "按回车继续..."
+                fi
+                continue
+                ;;
+            t)  # 跳转到测试
+                node_choice="T"
+                break
+                ;;
+            f)  # 快速测试
+                node_choice="F"
+                break
+                ;;
+            0)  # 返回
+                return 0
+                ;;
+            *)  # 数字选择
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total_nodes" ]; then
+                    node_choice="$choice"
+                    break
+                else
+                    print_error "无效的选择"
+                    sleep 1
+                fi
+                ;;
+        esac
+    done
+    
+    # 快速测试（只测试 <500ms 的节点）
+    if [ "$node_choice" = "F" ] || [ "$node_choice" = "f" ]; then
+        print_step "快速测试模式（只显示延迟 <500ms 的节点）"
+        echo ""
+        
+        # 检查是否有快速测试脚本
+        local fast_test_script="$(dirname "$0")/fast_test.sh"
+        if [ -f "$fast_test_script" ] && [ -x "$fast_test_script" ]; then
+            "$fast_test_script"
+        else
+            # 内置快速测试
+            local max_delay=500
+            local quick_timeout=2000
+            local test_results=()
+            
+            print_info "筛选延迟 <${max_delay}ms 的节点..."
+            echo ""
+            
+            # 创建临时目录
+            local temp_dir=$(mktemp -d)
+            
+            # 并发快速测试
+            local count=0
+            for i in "${!node_array[@]}"; do
+                local node="${node_array[$i]}"
+                
+                # 控制并发
+                while [ $(jobs -r 2>/dev/null | wc -l) -ge 20 ]; do
+                    sleep 0.02
+                done
+                
+                # 后台测试
+                (
+                    # 在子shell中禁用错误退出
+                    set +e
+                    local encoded_name=$(printf '%s' "$node" | jq -sRr @uri)
+                    local result=$(timeout 3 curl -s -H "$CURL_AUTH" \
+                        "$API_URL/proxies/$encoded_name/delay" \
+                        -X GET \
+                        -G --data-urlencode "timeout=$quick_timeout" \
+                        --data-urlencode "url=$TEST_URL" \
+                        2>/dev/null)
+                    
+                    if [ -n "$result" ]; then
+                        local delay=$(echo "$result" | jq -r '.delay // ""' 2>/dev/null)
+                        if [ -n "$delay" ] && [ "$delay" != "null" ] && [ "$delay" -lt "$max_delay" ]; then
+                            echo "$i|$node|$delay" > "$temp_dir/fast_$i"
+                        fi
+                    fi
+                ) &
+                
+                count=$((count + 1))
+                printf "\r测试进度: %d/%d" "$count" "${#node_array[@]}"
+            done
+            
+            # 等待完成
+            wait
+            echo -e "\n"
+            
+            # 收集并排序结果
+            local fast_results=()
+            for ((i=0; i<${#node_array[@]}; i++)); do
+                if [ -f "$temp_dir/fast_$i" ]; then
+                    fast_results+=("$(cat "$temp_dir/fast_$i")")
+                fi
+            done
+            
+            if [ ${#fast_results[@]} -gt 0 ]; then
+                echo "快速节点（延迟 <${max_delay}ms）："
+                echo "----------------------------------------"
+                
+                # 排序并显示
+                IFS=$'\n' sorted=($(printf '%s\n' "${fast_results[@]}" | sort -t'|' -k3 -n))
+                for result in "${sorted[@]}"; do
+                    IFS='|' read -r idx node delay <<< "$result"
+                    
+                    # 格式化显示
+                    local short_name="$node"
+                    if [ ${#node} -gt 40 ]; then
+                        short_name="${node:0:37}..."
+                    fi
+                    
+                    local color=""
+                    if [ "$delay" -lt 100 ]; then
+                        color=$GREEN
+                    elif [ "$delay" -lt 300 ]; then
+                        color=$YELLOW
+                    else
+                        color=$NC
+                    fi
+                    
+                    printf "%-40s " "${short_name}:"
+                    echo -e "${color}${delay}ms ✓${NC}"
+                done
+                echo "----------------------------------------"
+                echo ""
+                print_success "找到 ${#fast_results[@]} 个快速节点"
+            else
+                print_warning "没有找到延迟低于 ${max_delay}ms 的节点"
+            fi
+        fi
+        
+        # 清理临时目录
+        rm -rf "$temp_dir"
+        
+        echo ""
+        read -p "按回车继续..."
+        switch_proxy
+        return
+    fi
+    
+    # 测试延迟（全部节点）
+    if [ "$node_choice" = "T" ] || [ "$node_choice" = "t" ]; then
+        print_step "批量测试节点延迟（方式同 Clash Verge Rev）"
+        echo ""
+        
+        # 并发测试优化（使用配置文件设置）
+        local test_url="$TEST_URL"
+        local timeout="$TEST_TIMEOUT"
+        local max_concurrent="$MAX_CONCURRENT"
+        local test_count=0
+        # 防止算术运算导致脚本退出
+        set +e
+        local total_nodes=${#node_array[@]}
+        
+        print_info "测试 URL: $test_url"
+        print_info "超时时间: ${timeout}ms"
+        print_info "开始测试 $total_nodes 个节点..."
+        echo ""
+        
+        # 创建临时文件存储结果
+        local temp_dir=$(mktemp -d)
+        
+        # 确保临时目录创建成功
+        if [ ! -d "$temp_dir" ]; then
+            print_error "无法创建临时目录"
+            return 1
+        fi
+        
+        # 批量发起测试
+        for i in "${!node_array[@]}"; do
+            local node="${node_array[$i]}"
+            
+            # 控制并发数
+            while [ $(jobs -r 2>/dev/null | wc -l) -ge $max_concurrent ]; do
+                sleep 0.05
+            done
+            
+            # 后台执行测试
+            (
+                # 在子shell中禁用错误退出
+                set +e
+                local start_time=$(date +%s%3N)
+                local test_result=$(curl -s -H "$CURL_AUTH" \
+                    "$API_URL/proxies/$(printf '%s' "$node" | jq -sRr @uri)/delay" \
+                    -X GET \
+                    -G --data-urlencode "timeout=$timeout" \
+                    --data-urlencode "url=$test_url" \
+                    2>/dev/null)
+                
+                local end_time=$(date +%s%3N)
+                
+                if [ -n "$test_result" ]; then
+                    local delay=$(echo "$test_result" | jq -r '.delay // ""' 2>/dev/null)
+                    if [ -n "$delay" ] && [ "$delay" != "null" ]; then
+                        echo "$i|$node|$delay|success" > "$temp_dir/result_$i"
+                    else
+                        echo "$i|$node|timeout|fail" > "$temp_dir/result_$i"
+                    fi
+                else
+                    echo "$i|$node|error|fail" > "$temp_dir/result_$i"
+                fi
+            ) &
+            
+            test_count=$((test_count + 1))
+            
+            # 显示进度
+            printf "\r测试进度: %d/%d" "$test_count" "$total_nodes"
+        done
+        
+        # 等待所有测试完成
+        wait
+        echo -e "\n"
+        
+        # 收集并显示结果
+        echo "测试结果："
+        echo "----------------------------------------"
+        
+        # 排序并显示结果
+        for ((i=0; i<total_nodes; i++)); do
+            if [ -f "$temp_dir/result_$i" ]; then
+                IFS='|' read -r idx node delay status < "$temp_dir/result_$i"
+                
+                local display_num=$((idx + 1))
+                local delay_display=""
+                
+                # 处理节点名称（避免过长）
+                local short_name="$node"
+                if [ ${#node} -gt 40 ]; then
+                    short_name="${node:0:37}..."
+                fi
+                
+                if [ "$status" = "success" ]; then
+                    if [ "$delay" -lt "${DELAY_EXCELLENT:-100}" ]; then
+                        delay_display="${GREEN}${delay}ms ✓${NC}"
+                    elif [ "$delay" -lt "${DELAY_GOOD:-300}" ]; then
+                        delay_display="${YELLOW}${delay}ms ✓${NC}"
+                    else
+                        delay_display="${RED}${delay}ms ✓${NC}"
+                    fi
+                elif [ "$delay" = "timeout" ]; then
+                    delay_display="${RED}超时 ✗${NC}"
+                else
+                    delay_display="${RED}错误 ✗${NC}"
+                fi
+                
+                # 标记当前节点
+                local mark=""
+                if [ "$node" = "$current_node" ]; then
+                    mark="${GREEN} ← 当前${NC}"
+                fi
+                
+                # 格式化输出（与 Clash Verge Rev 一致）
+                printf "%-40s %s%s\n" "$short_name:" "$delay_display" "$mark"
+            fi
+        done
+        
+        echo "----------------------------------------"
+        
+        # 统计信息
+        local success_count=$(find "$temp_dir" -name "result_*" -exec grep -l "success" {} \; | wc -l)
+        local fail_count=$((total_nodes - success_count))
+        
+        echo ""
+        print_info "测试完成："
+        echo "  成功: $success_count 个节点"
+        echo "  失败: $fail_count 个节点"
+        
+        # 清理临时文件
+        rm -rf "$temp_dir"
+        
+        # 恢复错误退出设置
+        set -e
+        
+        echo ""
+        read -p "按回车继续选择节点..."
+        switch_proxy
+        return
+    fi
+    
+    if [ "$node_choice" -lt 1 ] || [ "$node_choice" -gt "${#node_array[@]}" ]; then
+        print_error "无效的选择"
+        return 1
+    fi
+    
+    local selected_node="${node_array[$((node_choice-1))]}"
+    
+    # 切换节点
+    print_step "切换到节点: $selected_node"
+    
+    local switch_result=$(curl -s -H "$CURL_AUTH" \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"$selected_node\"}" \
+        "$API_URL/proxies/$selected_group" 2>/dev/null)
+    
+    if [ $? -eq 0 ]; then
+        print_success "节点切换成功！"
+        
+        # 显示新的状态
+        echo ""
+        echo "当前配置："
+        echo "  代理组: $selected_group"
+        echo "  节点: $selected_node"
+        
+        # 测试新节点
+        echo ""
+        read -p "是否测试新节点连接？[Y/n]: " test_confirm
+        if [[ ! $test_confirm =~ ^[Nn]$ ]]; then
+            print_step "测试代理连接..."
+            
+            # 使用代理测试连接
+            local test_url="https://www.google.com"
+            local proxy_port=$(grep -E "^(mixed-port|port):" "$CONFIG_DIR/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' || echo "7890")
+            
+            if curl -s -x "http://127.0.0.1:$proxy_port" --connect-timeout 10 "$test_url" >/dev/null 2>&1; then
+                print_success "代理连接正常！"
+            else
+                print_warning "代理连接测试失败，请检查节点状态"
+            fi
+        fi
+    else
+        print_error "节点切换失败"
+        return 1
+    fi
+}
+
+# 代理模式切换
+switch_proxy_mode() {
+    print_header "代理模式切换"
+    
+    # 检查API状态
+    check_clash_status
+    if [ "$CLASH_API_OK" != "true" ]; then
+        print_error "Clash 未运行或 API 不可用"
+        return 1
+    fi
+    
+    # 获取API密钥
+    get_api_secret
+    
+    # 获取当前模式
+    local current_mode=$(get_proxy_mode)
+    echo -e "当前模式: ${GREEN}$current_mode${NC}"
+    echo ""
+    
+    echo "选择代理模式:"
+    echo "  1) Rule (规则模式) - 根据规则判断走代理或直连"
+    echo "  2) Global (全局模式) - 所有流量走代理"
+    echo "  3) Direct (直连模式) - 所有流量直连"
+    echo "  0) 返回"
+    echo ""
+    
+    read -p "请选择 [0-3]: " mode_choice
+    
+    local new_mode=""
+    case $mode_choice in
+        1)
+            new_mode="rule"
+            ;;
+        2)
+            new_mode="global"
+            ;;
+        3)
+            new_mode="direct"
+            ;;
+        0)
+            return
+            ;;
+        *)
+            print_error "无效选择"
+            return 1
+            ;;
+    esac
+    
+    # 切换模式
+    print_step "切换到 $new_mode 模式..."
+    
+    local result=$(curl -s -H "$CURL_AUTH" \
+        -X PATCH \
+        -H "Content-Type: application/json" \
+        -d "{\"mode\":\"$new_mode\"}" \
+        "$API_URL/configs" 2>/dev/null)
+    
+    if [ $? -eq 0 ]; then
+        print_success "模式切换成功！"
+        
+        # 验证切换结果
+        sleep 1
+        local verify_mode=$(get_proxy_mode)
+        echo ""
+        echo "当前模式: ${GREEN}$verify_mode${NC}"
+        
+        # 显示模式说明
+        echo ""
+        case "$new_mode" in
+            "rule")
+                echo "规则模式: 根据配置文件中的规则判断走代理或直连"
+                ;;
+            "global")
+                echo "全局模式: 所有流量都通过代理服务器"
+                ;;
+            "direct")
+                echo "直连模式: 所有流量都直接连接，不使用代理"
+                ;;
+        esac
+    else
+        print_error "模式切换失败"
+        return 1
+    fi
+}
+
+# 创建自毁脚本内容
+create_destruct_script() {
+    local script_path="$1"
+    local is_reboot="${2:-false}"
+    
+    if [ "$is_reboot" == "true" ]; then
+        # 重启版本的自毁脚本
+        cat > "$script_path" << 'EOF'
+#!/bin/bash
+# Clash 重启自毁脚本
+sleep 30  # 等待系统完全启动
+
+echo "[$(date)] 系统重启，执行自毁程序..." >> /tmp/clash_destruct.log
+EOF
+    else
+        # 普通版本的自毁脚本
+        cat > "$script_path" << 'EOF'
+#!/bin/bash
+# Clash 自毁脚本
+echo "[$(date)] 开始执行自毁程序..." >> /tmp/clash_destruct.log
+EOF
+    fi
+    
+    # 添加通用的自毁内容
+    cat >> "$script_path" << 'EOF'
+
+# 停止所有进程
+pkill -9 -f clash 2>/dev/null || true
+pkill -9 -f mihomo 2>/dev/null || true
+
+# 清理tmux会话
+tmux kill-server 2>/dev/null || true
+
+# 删除二进制文件
+sudo rm -f /usr/local/bin/clash /usr/local/bin/mihomo 2>/dev/null || true
+rm -f $HOME/.local/bin/clash $HOME/.local/bin/mihomo 2>/dev/null || true
+
+# 删除配置和数据
+rm -rf $HOME/.config/mihomo $HOME/.config/clash 2>/dev/null || true
+sudo rm -rf /etc/clash /etc/mihomo 2>/dev/null || true
+
+# 删除管理脚本目录
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+if [[ "$SCRIPT_DIR" == "/tmp" ]]; then
+    # 如果脚本在tmp目录，查找真实的管理脚本位置
+    REAL_DIR=$(find $HOME -name "clash_manager.sh" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
+    if [ -n "$REAL_DIR" ] && [ -d "$REAL_DIR" ]; then
+        echo "删除管理脚本目录: $REAL_DIR" >> /tmp/clash_destruct.log
+        rm -rf "$REAL_DIR"
+    fi
+else
+    rm -rf "$SCRIPT_DIR"
+fi
+
+# 清理系统服务
+sudo systemctl stop clash mihomo 2>/dev/null || true
+sudo systemctl disable clash mihomo 2>/dev/null || true
+sudo rm -f /etc/systemd/system/clash.service /etc/systemd/system/mihomo.service 2>/dev/null || true
+
+# 清理日志
+rm -rf /var/log/clash* /var/log/mihomo* 2>/dev/null || true
+
+# 清理crontab
+crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
+
+echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
+rm -f "$0"
+EOF
+    
+    chmod +x "$script_path"
+}
+
+# 定时自毁功能
+self_destruct() {
+    print_header "定时自毁设置"
+    
+    echo -e "${RED}⚠️  警告：此功能将在指定时间后完全删除 Clash 及所有相关文件！${NC}"
+    echo ""
+    echo "自毁内容包括："
+    echo "  • 停止所有 Clash 进程"
+    echo "  • 删除所有配置文件"
+    echo "  • 删除所有二进制文件"
+    echo "  • 删除所有管理脚本"
+    echo "  • 清理所有日志和缓存"
+    echo ""
+    
+    # 检查是否已有定时任务
+    local existing_jobs=$(crontab -l 2>/dev/null | grep -c "clash_self_destruct" || true)
+    if [ "$existing_jobs" -gt 0 ]; then
+        print_warning "已存在自毁任务："
+        crontab -l 2>/dev/null | grep "clash_self_destruct" | nl
+        echo ""
+        read -p "是否要查看/取消现有任务？[y/N]: " view_cancel
+        if [[ $view_cancel =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "1) 查看任务详情"
+            echo "2) 取消所有自毁任务"
+            echo "0) 返回"
+            read -p "请选择 [0-2]: " cancel_choice
+            
+            case $cancel_choice in
+                1)
+                    echo ""
+                    print_info "当前自毁任务："
+                    crontab -l 2>/dev/null | grep -E "(clash_self_destruct|CLASH_DESTRUCT)" || true
+                    
+                    # 检查at任务
+                    if command -v at >/dev/null 2>&1 && command -v atq >/dev/null 2>&1; then
+                        local at_jobs=$(atq 2>/dev/null | grep -E "clash|destruct" || true)
+                        if [ -n "$at_jobs" ]; then
+                            echo ""
+                            print_info "AT 任务："
+                            echo "$at_jobs"
+                        fi
+                    fi
+                    ;;
+                2)
+                    # 移除crontab中的自毁任务
+                    crontab -l 2>/dev/null | grep -v "clash_self_destruct" | crontab - 2>/dev/null || true
+                    
+                    # 移除at任务
+                    if command -v atrm >/dev/null 2>&1; then
+                        atq 2>/dev/null | awk '{print $1}' | xargs -r atrm 2>/dev/null || true
+                    fi
+                    
+                    # 删除自毁脚本
+                    rm -f /tmp/clash_self_destruct_*.sh
+                    
+                    print_success "所有自毁任务已取消"
+                    ;;
+            esac
+            return
+        fi
+    fi
+    
+    echo "选择自毁方式："
+    echo "1) 指定时间后自毁（分钟）"
+    echo "2) 指定具体时间自毁"
+    echo "3) 指定日期时间自毁"
+    echo "4) 系统重启时自毁"
+    echo "0) 取消"
+    echo ""
+    
+    read -p "请选择 [0-4]: " destruct_mode
+    
+    case $destruct_mode in
+        1)
+            echo ""
+            read -p "多少分钟后自毁？[1-1440]: " minutes
+            
+            # 验证输入
+            if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 1440 ]; then
+                print_error "无效的时间（1-1440分钟）"
+                return 1
+            fi
+            
+            # 创建自毁脚本
+            local destruct_script="/tmp/clash_self_destruct_$$.sh"
+            create_destruct_script "$destruct_script"
+            
+            # 计算执行时间
+            local exec_time=$(date -d "+$minutes minutes" "+%Y-%m-%d %H:%M:%S")
+            print_info "将在 $exec_time 执行自毁"
+            
+            # 使用at命令（如果可用）或创建cron任务
+            if command -v at >/dev/null 2>&1; then
+                echo "$destruct_script" | at now + $minutes minutes 2>/dev/null
+                print_success "自毁任务已设置（使用at）"
+            else
+                # 使用crontab
+                local cron_time=$(date -d "+$minutes minutes" "+%M %H %d %m")
+                (crontab -l 2>/dev/null; echo "$cron_time * $destruct_script # clash_self_destruct") | crontab -
+                print_success "自毁任务已设置（使用cron）"
+            fi
+            
+            print_warning "警告：系统将在 $minutes 分钟后自动删除所有 Clash 相关文件！"
+            echo ""
+            echo "取消方法："
+            echo "1. 运行: crontab -e 并删除包含 clash_self_destruct 的行"
+            echo "2. 或重新运行此功能并选择取消"
+            ;;
+            
+        2)
+            echo ""
+            echo "输入自毁时间（24小时制）"
+            read -p "时间 (HH:MM): " dest_time
+            
+            # 验证时间格式
+            if ! [[ "$dest_time" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+                print_error "无效的时间格式"
+                return 1
+            fi
+            
+            # 创建自毁脚本（同上）
+            local destruct_script="/tmp/clash_self_destruct_$$.sh"
+            cat > "$destruct_script" << 'EOF'
+#!/bin/bash
+# Clash 自毁脚本
+echo "[$(date)] 开始执行自毁程序..." >> /tmp/clash_destruct.log
+
+# 停止所有进程
+pkill -9 -f clash 2>/dev/null || true
+pkill -9 -f mihomo 2>/dev/null || true
+
+# 清理tmux会话
+tmux kill-server 2>/dev/null || true
+
+# 删除二进制文件
+sudo rm -f /usr/local/bin/clash /usr/local/bin/mihomo 2>/dev/null || true
+rm -f $HOME/.local/bin/clash $HOME/.local/bin/mihomo 2>/dev/null || true
+
+# 删除配置和数据
+rm -rf $HOME/.config/mihomo $HOME/.config/clash 2>/dev/null || true
+sudo rm -rf /etc/clash /etc/mihomo 2>/dev/null || true
+
+# 删除管理脚本目录
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+if [[ "$SCRIPT_DIR" == "/tmp" ]]; then
+    REAL_DIR=$(find $HOME -name "clash_manager.sh" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
+    if [ -n "$REAL_DIR" ] && [ -d "$REAL_DIR" ]; then
+        echo "删除管理脚本目录: $REAL_DIR" >> /tmp/clash_destruct.log
+        rm -rf "$REAL_DIR"
+    fi
+else
+    rm -rf "$SCRIPT_DIR"
+fi
+
+# 清理系统服务
+sudo systemctl stop clash mihomo 2>/dev/null || true
+sudo systemctl disable clash mihomo 2>/dev/null || true
+sudo rm -f /etc/systemd/system/clash.service /etc/systemd/system/mihomo.service 2>/dev/null || true
+
+# 清理日志
+rm -rf /var/log/clash* /var/log/mihomo* 2>/dev/null || true
+
+# 清理crontab
+crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
+
+echo "[$(date)] 自毁完成" >> /tmp/clash_destruct.log
+rm -f "$0"
+EOF
+            chmod +x "$destruct_script"
+            
+            # 设置cron任务
+            IFS=':' read -r hour minute <<< "$dest_time"
+            (crontab -l 2>/dev/null; echo "$minute $hour * * * $destruct_script # clash_self_destruct") | crontab -
+            
+            print_success "自毁任务已设置为每天 $dest_time 执行"
+            print_warning "如果只想执行一次，请在执行后手动取消任务"
+            ;;
+            
+        3)
+            echo ""
+            echo "输入自毁日期和时间"
+            read -p "日期 (YYYY-MM-DD): " dest_date
+            read -p "时间 (HH:MM): " dest_time
+            
+            # 验证日期时间
+            if ! date -d "$dest_date $dest_time" >/dev/null 2>&1; then
+                print_error "无效的日期时间"
+                return 1
+            fi
+            
+            # 检查是否是过去的时间
+            if [ $(date -d "$dest_date $dest_time" +%s) -lt $(date +%s) ]; then
+                print_error "不能设置过去的时间"
+                return 1
+            fi
+            
+            # 创建自毁脚本
+            local destruct_script="/tmp/clash_self_destruct_$$.sh"
+            create_destruct_script "$destruct_script"
+            
+            # 使用at命令设置特定时间
+            if command -v at >/dev/null 2>&1; then
+                echo "$destruct_script" | at "$dest_time" "$dest_date" 2>/dev/null
+                print_success "自毁任务已设置为 $dest_date $dest_time 执行"
+            else
+                print_error "需要安装 at 命令来设置特定日期时间"
+                print_info "Ubuntu/Debian: sudo apt-get install at"
+                print_info "CentOS/RHEL: sudo yum install at"
+                rm -f "$destruct_script"
+                return 1
+            fi
+            ;;
+            
+        4)
+            echo ""
+            print_warning "将在下次系统重启时执行自毁"
+            read -p "确认设置重启自毁？[y/N]: " confirm
+            if [[ ! $confirm =~ ^[Yy]$ ]]; then
+                print_info "已取消"
+                return
+            fi
+            
+            # 创建自毁脚本
+            local destruct_script="/tmp/clash_self_destruct_reboot.sh"
+            create_destruct_script "$destruct_script" true
+            
+            # 添加到crontab @reboot
+            (crontab -l 2>/dev/null; echo "@reboot $destruct_script # clash_self_destruct_reboot") | crontab -
+            
+            print_success "重启自毁已设置"
+            print_warning "系统下次重启时将自动删除所有 Clash 相关文件！"
+            ;;
+            
+        0)
+            print_info "已取消自毁设置"
+            return
+            ;;
+            
+        *)
+            print_error "无效的选择"
+            return 1
+            ;;
+    esac
+    
+    echo ""
+    print_info "提示："
+    echo "• 查看定时任务: crontab -l | grep clash"
+    echo "• 取消自毁: 重新运行此功能并选择取消"
+    echo "• 自毁日志: /tmp/clash_destruct.log"
+}
+
+# 卸载 Clash
+uninstall_clash() {
+    print_header "卸载 Clash"
+    
+    echo -e "${YELLOW}此操作将：${NC}"
+    echo "  • 停止 Clash 服务"
+    echo "  • 删除 Clash 二进制文件"
+    echo "  • 删除配置文件和数据"
+    echo "  • 清理所有相关会话"
+    echo ""
+    echo -e "${RED}警告：此操作不可逆！${NC}"
+    echo ""
+    
+    read -p "确认要完全卸载 Clash？[y/N]: " confirm
+    if [[ ! $confirm =~ ^[Yy]$ ]]; then
+        print_info "已取消卸载"
+        return 0
+    fi
+    
+    # 二次确认
+    read -p "请再次确认，输入 'UNINSTALL' 继续: " second_confirm
+    if [[ "$second_confirm" != "UNINSTALL" ]]; then
+        print_info "已取消卸载"
+        return 0
+    fi
+    
+    print_step "开始卸载..."
+    
+    # 1. 停止服务
+    print_step "停止 Clash 服务..."
+    stop_clash_service
+    
+    # 2. 清理所有会话
+    print_step "清理所有会话..."
+    cleanup_all
+    
+    # 3. 删除二进制文件
+    print_step "删除 Clash 二进制文件..."
+    local binary_locations=(
+        "/usr/local/bin/clash"
+        "/usr/bin/clash"
+        "$HOME/.local/bin/clash"
+    )
+    
+    for binary in "${binary_locations[@]}"; do
+        if [ -f "$binary" ]; then
+            if [ -w "$(dirname "$binary")" ]; then
+                rm -f "$binary"
+                print_info "已删除: $binary"
+            else
+                sudo rm -f "$binary"
+                print_info "已删除: $binary (使用 sudo)"
+            fi
+        fi
+    done
+    
+    # 4. 询问是否删除配置文件
+    echo ""
+    read -p "是否删除配置文件和数据？[y/N]: " delete_config
+    if [[ $delete_config =~ ^[Yy]$ ]]; then
+        print_step "删除配置文件..."
+        
+        # 备份重要配置
+        if [ -f "$CONFIG_DIR/config.yaml" ]; then
+            local backup_file="$HOME/clash_config_backup_$(date +%Y%m%d_%H%M%S).yaml"
+            cp "$CONFIG_DIR/config.yaml" "$backup_file"
+            print_info "配置文件已备份到: $backup_file"
+        fi
+        
+        # 删除配置目录
+        if [ -d "$CONFIG_DIR" ]; then
+            rm -rf "$CONFIG_DIR"
+            print_info "已删除配置目录: $CONFIG_DIR"
+        fi
+        
+        # 删除旧配置目录（如果存在）
+        if [ -d "$HOME/.config/clash" ]; then
+            rm -rf "$HOME/.config/clash"
+            print_info "已删除旧配置目录: $HOME/.config/clash"
+        fi
+    else
+        print_info "保留配置文件"
+    fi
+    
+    # 5. 清理系统服务（如果存在）
+    if systemctl is-enabled clash &>/dev/null 2>&1; then
+        print_step "删除系统服务..."
+        sudo systemctl stop clash
+        sudo systemctl disable clash
+        sudo rm -f /etc/systemd/system/clash.service
+        sudo systemctl daemon-reload
+        print_info "已删除系统服务"
+    fi
+    
+    # 6. 清理环境变量提示
+    echo ""
+    print_warning "如果您在 .bashrc 或 .zshrc 中设置了代理环境变量，请手动删除："
+    echo "  export http_proxy=http://127.0.0.1:7890"
+    echo "  export https_proxy=http://127.0.0.1:7890"
+    echo "  export all_proxy=socks5://127.0.0.1:7891"
+    
+    echo ""
+    print_success "Clash 已成功卸载！"
+    
+    # 询问是否删除管理脚本
+    echo ""
+    read -p "是否删除管理脚本？[y/N]: " delete_scripts
+    if [[ $delete_scripts =~ ^[Yy]$ ]]; then
+        print_info "管理脚本将在退出后自动删除"
+        # 创建临时脚本来删除当前目录
+        cat > /tmp/remove_clash_scripts.sh << EOF
+#!/bin/bash
+sleep 2
+rm -rf "$(pwd)"
+echo "管理脚本已删除"
+rm -f /tmp/remove_clash_scripts.sh
+EOF
+        chmod +x /tmp/remove_clash_scripts.sh
+        nohup /tmp/remove_clash_scripts.sh &>/dev/null &
+        exit 0
+    fi
+}
+
+# ==================== 主函数 ====================
 main() {
     case "${1:-menu}" in
         "install")
@@ -814,7 +2172,7 @@ main() {
             
             while true; do
                 show_menu
-                read -p "请选择 [0-11]: " choice
+                read -p "请选择 [0-16]: " choice
                 echo ""
                 
                 case $choice in
@@ -907,6 +2265,26 @@ main() {
                         if [[ $confirm =~ ^[Yy]$ ]]; then
                             cleanup_all
                         fi
+                        read -p "按回车继续..."
+                        ;;
+                    12)
+                        manage_subscription
+                        read -p "按回车继续..."
+                        ;;
+                    13)
+                        switch_proxy
+                        read -p "按回车继续..."
+                        ;;
+                    14)
+                        switch_proxy_mode
+                        read -p "按回车继续..."
+                        ;;
+                    15)
+                        self_destruct
+                        read -p "按回车继续..."
+                        ;;
+                    16)
+                        uninstall_clash
                         read -p "按回车继续..."
                         ;;
                     0)
