@@ -1745,18 +1745,10 @@ execute_immediate_destruct() {
     print_warning "开始执行自毁程序..."
     sleep 2
     
-    print_step "停止所有 Clash 进程..."
-    # 使用精确匹配避免杀死脚本自身
+    print_step "停止 Clash 进程..."
+    # 只停止 clash 和 mihomo 二进制程序（精确匹配）
     pkill -x clash 2>/dev/null || true
     pkill -x mihomo 2>/dev/null || true
-    
-    # 查找并杀死 clash 相关进程，但排除当前脚本
-    local current_pid=$$
-    for pid in $(pgrep -f "clash" 2>/dev/null || true); do
-        if [ "$pid" != "$current_pid" ] && [ "$pid" != "$PPID" ]; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
     
     print_step "清理 tmux 会话..."
     tmux kill-session -t "$SERVICE_SESSION" 2>/dev/null || true
@@ -1784,7 +1776,8 @@ execute_immediate_destruct() {
     rm -rf "$BACKUP_DIR" 2>/dev/null || true
     
     print_step "清理 crontab..."
-    crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
+    # 只删除包含 clash_self_destruct 的条目（这个脚本创建的）
+    crontab -l 2>/dev/null | grep -v "clash_self_destruct" | crontab - 2>/dev/null || true
     
     # 获取脚本所在目录（解析符号链接）
     local script_path="$(readlink -f "$0")"
