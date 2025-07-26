@@ -1786,31 +1786,67 @@ execute_immediate_destruct() {
     print_step "清理 crontab..."
     crontab -l 2>/dev/null | grep -v "clash" | crontab - 2>/dev/null || true
     
-    # 获取脚本所在目录
-    local script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+    # 获取脚本所在目录（解析符号链接）
+    local script_path="$(readlink -f "$0")"
+    local script_dir="$(dirname "$script_path")"
+    local script_name="$(basename "$script_path")"
     
-    print_success "自毁完成！"
-    echo "[$(date)] 自毁完成，即将删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
+    print_step "即将删除脚本目录: $script_dir"
     
     # 创建临时脚本来删除整个目录
     local temp_script="/tmp/clash_final_destruct_$$.sh"
     cat > "$temp_script" << EOF
 #!/bin/bash
-# 等待主脚本退出
+# 等待主脚本进程结束
+sleep 3
+
+# 确保主脚本已经退出
+while pgrep -f "$script_name" > /dev/null 2>&1; do
+    sleep 1
+done
+
+# 再等待一下确保文件句柄释放
 sleep 2
-# 删除整个脚本目录
-rm -rf "$script_dir"
-echo "[$(date)] 已删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
-# 删除自己
+
+# 强制删除整个脚本目录
+if [ -d "$script_dir" ]; then
+    rm -rf "$script_dir" 2>/dev/null || {
+        # 如果失败，尝试先切换到其他目录
+        cd /tmp
+        rm -rf "$script_dir" 2>/dev/null || {
+            # 最后尝试使用 find 删除
+            find "$script_dir" -type f -exec rm -f {} \; 2>/dev/null
+            find "$script_dir" -type d -empty -delete 2>/dev/null
+            rmdir "$script_dir" 2>/dev/null || true
+        }
+    }
+fi
+
+# 记录结果
+if [ ! -d "$script_dir" ]; then
+    echo "[$(date)] 成功删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
+else
+    echo "[$(date)] 警告：无法完全删除脚本目录: $script_dir" >> /tmp/clash_destruct.log
+    echo "[$(date)] 剩余内容：" >> /tmp/clash_destruct.log
+    ls -la "$script_dir" >> /tmp/clash_destruct.log 2>&1
+fi
+
+# 删除临时脚本自己
 rm -f "$temp_script"
 EOF
     
     chmod +x "$temp_script"
     
-    # 在后台执行删除脚本
-    nohup "$temp_script" >/dev/null 2>&1 &
+    print_success "自毁程序已启动！"
+    echo "[$(date)] 自毁程序已启动，目标目录: $script_dir" >> /tmp/clash_destruct.log
     
-    print_step "正在删除脚本目录: $script_dir"
+    # 使用 setsid 在新会话中执行，确保与当前进程分离
+    setsid bash "$temp_script" </dev/null >/dev/null 2>&1 &
+    
+    # 给用户一些反馈
+    echo ""
+    print_info "脚本目录将在程序退出后被删除"
+    print_info "查看日志: cat /tmp/clash_destruct.log"
     
     # 退出主脚本
     exit 0
