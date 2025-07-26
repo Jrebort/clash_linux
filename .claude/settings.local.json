@@ -12,7 +12,8 @@
       "Bash(cp:*)",
       "Bash(sed:*)",
       "Bash(awk:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(dos2unix:*)"
     ],
     "deny": []
   }

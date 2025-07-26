@@ -805,17 +805,107 @@ cleanup_all() {
     print_success "清理完成"
 }
 
+# 订阅下载功能（内置）
+download_subscription() {
+    local url="$1"
+    local output="${2:-$CONFIG_DIR/config.yaml}"
+    local temp_file="${output}.tmp"
+    
+    print_info "下载订阅配置..."
+    print_info "URL: $url"
+    
+    # 创建必要的目录
+    mkdir -p "$(dirname "$output")"
+    mkdir -p "$BACKUP_DIR"
+    
+    # 备份当前配置
+    if [ -f "$output" ]; then
+        local backup_name="config_$(date +%Y%m%d_%H%M%S).yaml"
+        cp "$output" "$BACKUP_DIR/$backup_name"
+        print_info "已备份当前配置到: $backup_name"
+    fi
+    
+    # 下载配置
+    local http_code=$(curl -w "%{http_code}" -sL \
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+        -H "Accept: text/plain, application/yaml, application/x-yaml, text/yaml, */*" \
+        -o "$temp_file" \
+        "$url" 2>/dev/null)
+    
+    # 检查 HTTP 状态码
+    if [[ "$http_code" -ne 200 ]]; then
+        print_error "下载失败，HTTP 状态码: $http_code"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # 检查文件是否存在且不为空
+    if [[ ! -s "$temp_file" ]]; then
+        print_error "下载的文件为空"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # 获取文件大小
+    local file_size=$(stat -c%s "$temp_file" 2>/dev/null || stat -f%z "$temp_file" 2>/dev/null || echo 0)
+    print_info "文件大小: $((file_size / 1024)) KB"
+    
+    # 检查是否为错误页面
+    local first_line=$(head -1 "$temp_file" | tr -d '\r\n' | tr -d ' ')
+    if [[ "$first_line" =~ ^\<\!DOCTYPE ]] || [[ "$first_line" =~ ^\<html ]]; then
+        print_error "获取到的是 HTML 页面而不是配置文件"
+        print_info "可能原因："
+        print_info "1. 订阅链接错误"
+        print_info "2. 需要认证或被防火墙阻止"
+        print_info "3. 订阅已过期"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # 检查是否为有效的 YAML 格式（简单检查）
+    if ! grep -q "^\(proxies\|rules\|proxy-groups\|port\|socks-port\|mixed-port\):" "$temp_file"; then
+        print_warning "文件可能不是有效的 Clash 配置格式"
+        print_info "将继续保存，但可能需要手动检查"
+    fi
+    
+    # 移动到目标位置
+    mv "$temp_file" "$output"
+    
+    # 设置文件权限
+    chmod 600 "$output"
+    
+    print_success "订阅下载成功！"
+    
+    # 显示配置摘要
+    echo ""
+    print_info "配置摘要："
+    
+    # 统计节点数量
+    local proxy_count=$(grep -c "^[[:space:]]*- name:" "$output" 2>/dev/null || echo 0)
+    print_info "代理节点数: $proxy_count"
+    
+    # 显示端口配置
+    local mixed_port=$(grep "^mixed-port:" "$output" 2>/dev/null | awk '{print $2}' || echo "")
+    local http_port=$(grep "^port:" "$output" 2>/dev/null | awk '{print $2}' || echo "")
+    local socks_port=$(grep "^socks-port:" "$output" 2>/dev/null | awk '{print $2}' || echo "")
+    
+    [[ -n "$mixed_port" ]] && print_info "混合端口: $mixed_port"
+    [[ -n "$http_port" ]] && print_info "HTTP 端口: $http_port"
+    [[ -n "$socks_port" ]] && print_info "SOCKS 端口: $socks_port"
+    
+    # 保留最近10个备份
+    local backup_count=$(ls -1 "$BACKUP_DIR"/config_*.yaml 2>/dev/null | wc -l)
+    if [ $backup_count -gt 10 ]; then
+        ls -1t "$BACKUP_DIR"/config_*.yaml | tail -n +11 | xargs rm -f
+        print_info "清理旧备份，保留最近10个"
+    fi
+    
+    return 0
+}
+
 # 订阅管理
 manage_subscription() {
     print_header "订阅管理"
-    
-    # 检查下载器是否存在
-    local downloader_path="$(dirname "$0")/subdownloader.sh"
-    if [ ! -f "$downloader_path" ]; then
-        print_error "订阅下载器不存在: $downloader_path"
-        print_info "请确保 subdownloader.sh 在同一目录下"
-        return 1
-    fi
     
     echo "1) 更新订阅（从链接）"
     echo "2) 导入订阅（从文件）"
@@ -839,9 +929,9 @@ manage_subscription() {
                 return 1
             fi
             
-            # 自动处理 URL，确保安全传递
+            # 使用内置下载功能
             print_step "下载订阅配置..."
-            if "$downloader_path" -b -t "$sub_url"; then
+            if download_subscription "$sub_url"; then
                 print_success "订阅更新成功！"
                 
                 # 询问是否重启服务
