@@ -498,6 +498,68 @@ list_backups() {
 
 # ==================== 主要功能 ====================
 
+# 下载 MMDB 文件
+download_mmdb() {
+    local mmdb_file="$CONFIG_DIR/geoip.metadb"
+    local country_mmdb="$CONFIG_DIR/Country.mmdb"
+    
+    # 如果文件已存在且大小合理，跳过下载
+    if [ -f "$mmdb_file" ] && [ $(stat -c%s "$mmdb_file" 2>/dev/null || echo 0) -gt 1000 ]; then
+        return 0
+    fi
+    
+    if [ -f "$country_mmdb" ] && [ $(stat -c%s "$country_mmdb" 2>/dev/null || echo 0) -gt 1000 ]; then
+        return 0
+    fi
+    
+    print_step "检测到缺少 MMDB 文件，正在下载..."
+    
+    # 定义下载 URL
+    local mmdb_urls=(
+        "https://mirror.ghproxy.com/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+        "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+        "https://gh.con.sh/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+        "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+    )
+    
+    local country_urls=(
+        "https://cdn.jsdelivr.net/gh/Dreamacro/maxmind-geoip@release/Country.mmdb"
+        "https://fastly.jsdelivr.net/gh/Dreamacro/maxmind-geoip@release/Country.mmdb"
+    )
+    
+    # 先尝试下载 geoip.metadb
+    for url in "${mmdb_urls[@]}"; do
+        print_info "尝试: $url"
+        if curl -L -o "$mmdb_file.tmp" "$url" --connect-timeout 10 --max-time 60 -# 2>/dev/null; then
+            if [ -f "$mmdb_file.tmp" ] && [ $(stat -c%s "$mmdb_file.tmp" 2>/dev/null || echo 0) -gt 1000 ]; then
+                mv "$mmdb_file.tmp" "$mmdb_file"
+                print_success "MMDB 文件下载成功"
+                return 0
+            fi
+        fi
+        rm -f "$mmdb_file.tmp"
+    done
+    
+    # 如果失败，尝试下载 Country.mmdb
+    print_warning "geoip.metadb 下载失败，尝试下载 Country.mmdb..."
+    for url in "${country_urls[@]}"; do
+        print_info "尝试: $url"
+        if curl -L -o "$country_mmdb.tmp" "$url" --connect-timeout 10 --max-time 60 -# 2>/dev/null; then
+            if [ -f "$country_mmdb.tmp" ] && [ $(stat -c%s "$country_mmdb.tmp" 2>/dev/null || echo 0) -gt 1000 ]; then
+                mv "$country_mmdb.tmp" "$country_mmdb"
+                print_success "Country.mmdb 下载成功"
+                return 0
+            fi
+        fi
+        rm -f "$country_mmdb.tmp"
+    done
+    
+    print_error "MMDB 文件下载失败"
+    print_info "你可以手动下载后放到: $CONFIG_DIR/"
+    print_info "或者先禁用配置文件中的 GEOIP 规则"
+    return 1
+}
+
 # 启动Clash服务
 start_clash_service() {
     print_header "启动Clash服务"
@@ -507,6 +569,9 @@ start_clash_service() {
         print_info "请先安装内核: $0 install"
         return 1
     fi
+    
+    # 下载 MMDB 文件（如果需要）
+    download_mmdb
     
     check_clash_status
     
