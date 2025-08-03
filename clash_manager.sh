@@ -581,8 +581,25 @@ create_debug_environment() {
     print_header "创建调试环境"
     
     check_clash_status
-    if [ "$CLASH_RUNNING" = "false" ] || [ "$CLASH_API_OK" = "false" ]; then
-        print_error "Clash服务未运行，请先启动服务"
+    
+    # 分别检查不同的错误情况，给出更准确的提示
+    if [ "$CLASH_RUNNING" = "false" ]; then
+        print_error "Clash 进程未运行，请先启动服务"
+        return 1
+    fi
+    
+    if [ "$CLASH_API_OK" = "false" ]; then
+        print_error "Clash API 无法访问"
+        echo "可能的原因："
+        echo "  • API 端口配置错误（当前：$CLASH_API_URL）"
+        echo "  • 防火墙阻止了 API 端口"
+        echo "  • Clash 正在启动中，请稍后再试"
+        echo "  • 配置文件中未启用 external-controller"
+        echo ""
+        echo "建议："
+        echo "  1. 检查配置文件中的 external-controller 设置"
+        echo "  2. 确认 API 端口未被占用"
+        echo "  3. 查看 Clash 日志了解详细信息"
         return 1
     fi
     
